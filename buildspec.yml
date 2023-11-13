@@ -1,0 +1,31 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      docker: 18
+      java: corretto8
+    commands:
+      - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --storage-driver=overlay2&
+      - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - $(aws ecr get-login --no-include-email --region $AWS_REGION)
+      - echo AccountId $ACCOUNT_ID
+      - echo DockerImageName $DOCKER_IMAGE_NAME
+  build:
+    commands:
+      - curl https://bintray.com/sbt/rpm/rpm | tee /etc/yum.repos.d/bintray-sbt-rpm.repo
+      - yum install sbt -y
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - docker build --build-arg REGION=$AWS_REGION --build-arg ACCOUNT_ID=$ACCOUNT_ID -t $DOCKER_IMAGE_NAME .
+      - docker tag $DOCKER_IMAGE_NAME:latest $ECR_IMAGE_NAME
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker image...
+      - docker push $ECR_IMAGE_NAME
+      - aws s3 cp 02-glue-job/src/main/scala/FilterTag.scala s3://$RESOURCES_BUCKET/$COMMIT_HASH/
+      - aws s3 cp 02-glue-job/src/main/scala/GAPreprocessor.scala s3://$RESOURCES_BUCKET/$COMMIT_HASH/

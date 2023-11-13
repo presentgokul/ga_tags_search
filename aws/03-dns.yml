@@ -1,0 +1,28 @@
+Description: "Docker Repo"
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  BranchName:
+    Type: String
+
+Conditions:
+  IsProd:
+    Fn::Equals:
+      - !Ref BranchName
+      - "release"
+
+Resources:
+
+  WebhookDNS:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !If [IsProd, !Sub "search.gokulga.com.", !Sub "search.gokulga-${BranchName}.com."]
+      HostedZoneId:
+        Fn::ImportValue: !Sub HostedZone-${BranchName}
+      Type: A
+      AliasTarget:
+        DNSName:
+          Fn::ImportValue: !Sub SearchLoadBalancerDNSName-${BranchName}
+        EvaluateTargetHealth: false
+        HostedZoneId:
+          Fn::ImportValue: !Sub SearchLoadBalancerCanonicalHostedZoneID-${BranchName}

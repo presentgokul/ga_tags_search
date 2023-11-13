@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  CredentialsArn:
+    Type: String
+  BranchName:
+    Type: String
+  ProjectName:
+    Type: String
+
+Resources:
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: code-pipeline
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - cloudwatch:*
+                  - cloudformation:*
+                  - iam:PassRole
+                  - codebuild:*
+                  - codestar-connections:*
+                Resource: "*"
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+                - cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref S3Bucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      RestartExecutionOnUpdate: true
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: SourceCode
+              Namespace: "SourceVariables"
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: 1
+              Configuration:
+                BranchName: !Ref BranchName
+                FullRepositoryId: !Sub "presentgokul/${ProjectName}"
+                ConnectionArn: !Ref CredentialsArn
+              OutputArtifacts:
+                - Name: !Ref ProjectName
+              RunOrder: 1
+        - Name: "Deploy-Pipeline"
+          Actions:
+            - Name: "Deploy-CodePipeline"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-pipeline-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/00-pipeline.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: "CAPABILITY_NAMED_IAM"
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "ProjectName": "${ProjectName}",
+                    "BranchName": "${BranchName}",
+                    "CredentialsArn": "${CredentialsArn}"
+                  }
+              InputArtifacts:
+                - Name: !Ref ProjectName
+              RunOrder: 1
+        - Name: "Deploy-Infrastructure"
+          Actions:
+            - Name: "Deploy-Infrastructure"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-infrastructure-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/01-infrastructure.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: "CAPABILITY_NAMED_IAM"
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "BranchName": "${BranchName}",
+                    "ProjectName": "${ProjectName}"
+                  }
+                OutputFileName: "infrastructure-stack-output.json"
+              InputArtifacts:
+                - Name: !Ref ProjectName
+              OutputArtifacts:
+                - Name: !Sub "${ProjectName}-infrastructure"
+              RunOrder: 1
+            - Name: "Deploy-Codebuild"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-codebuild-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/01-codebuild.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: "CAPABILITY_NAMED_IAM"
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "ProjectName": "${ProjectName}-${BranchName}",
+                    "BranchName": "${BranchName}",
+                    "ArtifactBucket": { "Fn::GetParam" : ["${ProjectName}-infrastructure", "infrastructure-stack-output.json", "ArtifactsBucket"]}
+                  }
+              InputArtifacts:
+                - Name: !Ref ProjectName
+                - Name: !Sub "${ProjectName}-infrastructure"
+              RunOrder: 2
+            - Name: "Deploy-DynamoDB"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-dynambodb-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/02-dynamodb.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "BranchName": "${BranchName}"
+                  }
+                OutputFileName: "dynamodb-stack-output.json"
+              InputArtifacts:
+                - Name: !Ref ProjectName
+              OutputArtifacts:
+                - Name: !Sub "${ProjectName}-dynamodb"
+              RunOrder: 2
+            - Name: "Deploy-GlueJob"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-gluejob-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/02-glue-job.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "CommitHash": "#{SourceVariables.CommitId}",
+                    "BranchName": "${BranchName}",
+                    "ArtifactBucket": { "Fn::GetParam" : ["${ProjectName}-infrastructure", "infrastructure-stack-output.json", "ArtifactsBucket"]},
+                    "GAPreprocessedDataBucket": { "Fn::GetParam" : ["${ProjectName}-infrastructure", "infrastructure-stack-output.json", "PreProcessGATagBucket"]}
+                  }
+                OutputFileName: "glue-stack-output.json"
+              InputArtifacts:
+                - Name: !Ref ProjectName
+                - Name: !Sub "${ProjectName}-infrastructure"
+              OutputArtifacts:
+                - Name: !Sub "${ProjectName}-glue"
+              RunOrder: 3 
+            - Name: "Deploy-Kinesis-Stream"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-kinesis-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/02-kinesis-streams.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "BranchName": "${BranchName}",
+                    "ProjectName": "${ProjectName}",
+                    "ServiceGlueJob": { "Fn::GetParam" : ["${ProjectName}-glue", "glue-stack-output.json", "ServiceGlueJob"]} 
+                  }
+                OutputFileName: "kinesis-stack-output.json"
+              InputArtifacts:
+                - Name: !Ref ProjectName
+                - Name: !Sub "${ProjectName}-glue"
+              OutputArtifacts:
+                - Name: !Sub "${ProjectName}-kinesis"
+              RunOrder: 4
+        - Name: "Build"
+          Actions:
+            - Name: "Build-Docker-Containers"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Sub "${ProjectName}-${BranchName}"
+                EnvironmentVariables: !Sub |
+                  [
+                    {
+                      "name": "ACCOUNT_ID",
+                      "value": "${AWS::AccountId}",
+                      "type": "PLAINTEXT"
+                    },
+                    {
+                      "name": "DOCKER_IMAGE_NAME",
+                      "value": "${ProjectName}",
+                      "type": "PLAINTEXT"
+                    },
+                    {
+                      "name": "ECR_IMAGE_NAME",
+                      "value": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-${BranchName}:#{SourceVariables.CommitId}",
+                      "type": "PLAINTEXT"
+                    },
+                    {
+                      "name": "COMMIT_HASH",
+                      "value": "#{SourceVariables.CommitId}",
+                      "type": "PLAINTEXT"
+                    }
+                  ]
+              InputArtifacts:
+                - Name: !Ref ProjectName
+              RunOrder: 1
+        - Name: "Deploy-Services"
+          Actions: 
+            - Name: "Deploy-Services"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-services-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/02-services.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: "CAPABILITY_NAMED_IAM"
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "Image": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-${BranchName}:#{SourceVariables.CommitId}",
+                    "BranchName": "${BranchName}",
+                    "HostedZoneBranchName": "${BranchName}",
+                    "ServiceDataBucket": { "Fn::GetParam" : ["${ProjectName}-infrastructure", "infrastructure-stack-output.json", "ServiceBucket"]},
+                    "GAPreprocessedDataBucket": { "Fn::GetParam" : ["${ProjectName}-infrastructure", "infrastructure-stack-output.json", "PreProcessGATagBucket"]},
+                    "ServiceTable": { "Fn::GetParam" : ["${ProjectName}-dynamodb", "dynamodb-stack-output.json", "ServiceTable"]},
+                    "ServiceGlueJob": { "Fn::GetParam" : ["${ProjectName}-glue", "glue-stack-output.json", "ServiceGlueJob"]},
+                    "ServiceKinesisStream": { "Fn::GetParam" : ["${ProjectName}-kinesis", "kinesis-stack-output.json", "ServiceKinesisStream"]} 
+                  }
+              InputArtifacts:
+                - Name: !Ref ProjectName
+                - Name: !Sub "${ProjectName}-infrastructure"
+                - Name: !Sub "${ProjectName}-dynamodb"
+                - Name: !Sub "${ProjectName}-glue"
+                - Name: !Sub "${ProjectName}-kinesis"
+              RunOrder: 1
+            - Name: "Deploy-DNS"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub "${ProjectName}-dns-${BranchName}"
+                TemplatePath: !Sub "${ProjectName}::aws/03-dns.yml"
+                TemplateConfiguration: !Sub "${ProjectName}::aws/metadata.json"
+                Capabilities: "CAPABILITY_NAMED_IAM"
+                RoleArn: !GetAtt DeployRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "BranchName": "${BranchName}"
+                  }
+              InputArtifacts:
+                - Name: !Ref ProjectName
+              RunOrder: 2

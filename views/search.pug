@@ -1,0 +1,13 @@
+extends layout
+
+block content
+  h1= title
+
+  div=data
+
+  div(id="my_dataviz")
+
+  script(src='https://d3js.org/d3.v4.js')
+  script.
+    const data=!{data}
+  script(src='/javascripts/graph.js')

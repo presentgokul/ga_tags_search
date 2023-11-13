@@ -1,0 +1,12 @@
+extends layout
+
+block content
+  div(class ="jumbotron")
+      h1(class="display-4 text-left") Graph Search
+      p(class="lead text-left") This is a graph based search for an Id which provides the connection to other ids.
+  form(method='POST' action='search' enctype="multipart/form-data")
+    div
+      label(for="objId" class="label-default") ID:
+      input(name='id' type='text' class="form-control form-control-lg")
+      | <br/>
+      input(type='submit' class="btn btn-primary")

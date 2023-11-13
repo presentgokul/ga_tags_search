@@ -1,0 +1,36 @@
+extends layout
+
+block content
+  form(id="filerform")
+    div(class ="jumbotron")
+      h1(class="display-4 text-left") Client Id Search for Tag
+      p(class="lead text-left") This is a tag based search which provides the list of golden record id.
+    div
+      label(for="tag" class="label-default") Tag:
+      input(name='tag' id='tag' type='text' placeholder="Enter Tag" class="form-control form-control-lg")
+      | <br/>
+      label(for="description") Description:
+      input(name='description' id='description' type='text' placeholder="Enter Description" class="form-control form-control-lg")
+      | <br/>
+      input(type='button' value="Search" onclick='searchFilter()' class="btn btn-primary")
+    | <br/>
+
+    div(id="resultdiv" class="alert alert-warning invisible" role="alert")
+        label(for="tag" class="label-default") Download Results : 
+        a( id ="downloadlink" href='#' download) Click Me
+    div(class="panel panel-default")
+      div(class="panel-heading h2") History Searches
+      div(class="panel-body")  
+        table(id="tbl_history" class="table table-striped" )
+          thead(class="table-light")
+            tr
+              th Tag
+              th Description
+              th Status
+              th 
+          tbody(id="tblbody_history")
+    script(src="/javascripts/filter.js")
+    div(id ="msgSuccessalert" class="alert alert-success invisible" style='position:fixed;height:8%;top:1px;left:30%;width:50%;z-index:9999;')
+    div(id ="msgFailurealert" class="alert alert-danger invisible" style='position:fixed;height:8%;top:1px;left:30%;width:50%;z-index:9999;')
+    div(class="g-signin2" data-onsuccess="initClient" style='display:none')
+    script(src="https://apis.google.com/js/platform.js" async defer)

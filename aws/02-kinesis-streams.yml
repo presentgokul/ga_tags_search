@@ -1,0 +1,72 @@
+Description: "Docker Repo"
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  ProjectName:
+    Type: String
+  BranchName:
+    Type: String
+  ServiceGlueJob:
+    Type: String
+
+Resources:
+
+  Kinesis:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      ShardCount: 1
+      RetentionPeriodHours: 24
+
+  ListenToGlueJob:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern: !Sub 
+      - |
+        {
+          "source": [
+            "aws.glue"
+          ],
+          "detail-type": [
+            "Glue Job State Change"
+          ],
+          "detail": {
+            "jobName": [
+              "${ServiceGlueJob}"
+            ],
+            "state": [
+              "SUCCEEDED"
+            ]
+          }
+        }
+      - ServiceGlueJob: !Ref ServiceGlueJob
+      Targets:
+        - Arn: !GetAtt Kinesis.Arn
+          Id: KinesisStream
+          RoleArn: !GetAtt KinesisWriteRole.Arn
+  
+  KinesisWriteRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: KinesisWritePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "kinesis:*"
+                Resource:
+                  - !GetAtt Kinesis.Arn
+
+Outputs:
+  ServiceKinesisStream:
+    Description: ServiceKinesisStream
+    Value: !Ref Kinesis

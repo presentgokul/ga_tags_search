@@ -1,0 +1,253 @@
+Description: "Docker Services"
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  Image:
+    Type: String
+  BranchName:
+    Type: String
+  HostedZoneBranchName:
+    Type: String
+  ServiceDataBucket:
+    Type: String
+  GAPreprocessedDataBucket:
+    Type: String
+  ServiceTable:
+    Type: String
+  ServiceGlueJob:
+    Type: String
+  ServiceKinesisStream:
+    Type: String
+Conditions:
+  IsProd:
+    Fn::Equals:
+      - !Ref BranchName
+      - "release"
+
+Resources:
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+
+  SearchCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !If [IsProd, !Sub "search.gokulga.com", !Sub "search.gokulga-${BranchName}.com"]
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !If [IsProd, !Sub "search.gokulga.com", !Sub "search.gokulga-${BranchName}.com"]
+          HostedZoneId:
+            Fn::ImportValue: !Sub "HostedZone-${HostedZoneBranchName}"
+
+  SearchLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      SecurityGroups:
+        - !Ref LoadBalancerSecGroup
+      Subnets:
+        - !ImportValue PublicSubnetA
+        - !ImportValue PublicSubnetB
+        - !ImportValue PublicSubnetC
+
+  SearchHTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Protocol: HTTPS
+      Port: 443
+      LoadBalancerArn: !Ref SearchLoadBalancer
+      Certificates:
+        - CertificateArn: !Ref SearchCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref LoadBalancerTargetGroup
+
+  LoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue VPCID
+      TargetType: ip
+      Protocol: HTTP
+      Port: 3000
+      HealthCheckPath: /healthcheck
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: [SearchHTTPSListener]
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      LoadBalancers:
+        - ContainerName: !Sub gaid-search-${BranchName}
+          ContainerPort: 3000
+          TargetGroupArn: !Ref LoadBalancerTargetGroup
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+            - Fn::ImportValue: !Sub GraphAccessSecurityGroup-${BranchName}
+          Subnets:
+            - !ImportValue PrivateSubnetA
+            - !ImportValue PrivateSubnetB
+            - !ImportValue PrivateSubnetC
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub gaid-search-${BranchName}
+      TaskRoleArn: !Ref TaskRole
+      ExecutionRoleArn: !Ref TaskRole
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Memory: 4096
+      Cpu: 2048
+      ContainerDefinitions:
+        - Image: !Ref Image
+          Name: !Sub gaid-search-${BranchName}
+          Environment:
+            - Name: NEPTUNE_CONNECTION_STRING
+              Value:
+                Fn::Sub:
+                  - "wss://${HOST}:${PORT}/gremlin"
+                  - HOST:
+                      Fn::ImportValue: !Sub GraphClusterEndpoint-${BranchName}
+                    PORT:
+                      Fn::ImportValue: !Sub GraphClusterPort-${BranchName}
+            - Name: SERVICE_TABLE
+              Value: !Ref ServiceTable
+            - Name: SERVICE_BUCKET
+              Value: !Ref ServiceDataBucket
+            - Name: SERVICE_GLUE
+              Value: !Ref ServiceGlueJob
+            - Name: KINESIS_STREAM_NAME
+              Value: !Ref ServiceKinesisStream
+            - Name: GA_PREPROCESSED_DATABUCKET
+              Value: !Ref GAPreprocessedDataBucket
+          PortMappings:
+            - ContainerPort: 3000
+              HostPort: 3000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: '/aws/ecs'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 30
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: neptune-access
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "neptune-db:connect"
+                Resource: !Sub
+                  - "arn:aws:neptune-db:${AWS::Region}:${AWS::AccountId}:${ClusterId}/*"
+                  - ClusterId:
+                      Fn::ImportValue: !Sub GraphClusterResourceId-${BranchName}
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: 
+                  - !Sub
+                    - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
+                    - TableName: !Ref ServiceTable
+                  - !Sub
+                    - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/*"
+                    - TableName: !Ref ServiceTable
+              - Effect: Allow
+                Action:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub
+                    - "arn:aws:s3:::${BucketName}"
+                    - BucketName: !Ref ServiceDataBucket
+                  - !Sub
+                    - "arn:aws:s3:::${BucketName}/*"
+                    - BucketName: !Ref ServiceDataBucket
+                  - !Sub
+                    - "arn:aws:s3:::${BucketName}"
+                    - BucketName: !Ref GAPreprocessedDataBucket
+              - Effect: "Allow"
+                Action:
+                  - "glue:StartJobRun"
+                  - "glue:GetJobRun"
+                  - "glue:GetJobRuns"
+                  - "glue:BatchStopJobRun"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "kinesis:*"
+                Resource: "*"
+                  
+
+  LoadBalancerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Load balancer only allow https
+      VpcId: !ImportValue VPCID
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 443
+          IpProtocol: TCP
+          ToPort: 443
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Container security group to allow apache access
+      VpcId: !ImportValue VPCID
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 3000
+          IpProtocol: TCP
+          ToPort: 3000
+
+Outputs:
+  SearchLoadBalancerDNSName:
+    Description: DNS Name of load balancer
+    Value: !GetAtt SearchLoadBalancer.DNSName
+    Export:
+      Name: !Sub SearchLoadBalancerDNSName-${BranchName}
+
+  SearchLoadBalancerCanonicalHostedZoneID:
+    Description: Canonical Hosted Zone ID of load balancer
+    Value: !GetAtt SearchLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub SearchLoadBalancerCanonicalHostedZoneID-${BranchName}

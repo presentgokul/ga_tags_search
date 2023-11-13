@@ -1,0 +1,30 @@
+{
+  "name": "search-data",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node ./bin/www"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.799.0",
+    "aws4": "^1.11.0",
+    "cookie-parser": "~1.4.4",
+    "crypto-js": "^4.0.0",
+    "debug": "~2.6.9",
+    "express": "~4.16.1",
+    "express-fileupload": "^1.2.0",
+    "google-auth-library": "^6.1.3",
+    "gremlin": "^3.4.9",
+    "http-errors": "~1.6.3",
+    "joi": "^17.4.0",
+    "morgan": "~1.9.1",
+    "pug": "2.0.0-beta11",
+    "uuid": "^8.3.1",
+    "ws": "^7.4.3"
+  },
+  "description": "This should allow external analysts to drop files into s3 and have a table automatically wrapped around it, such that they can query it immediately within Athena.",
+  "main": "app.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

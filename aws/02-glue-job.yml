@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  BranchName:
+    Type: String
+  CommitHash:
+    Type: String
+  Zone:
+    Type: String
+    Default: 'raw'
+  Project:
+    Type: String
+    Default: 'gaid'
+  Namespace:
+    Type: String
+    Default: 'gatags'
+  Version:
+    Type: String
+    AllowedPattern: '^v[0-9]+$'
+    Default: 'v1'
+  ArtifactBucket:
+    Type: String
+  GAPreprocessedDataBucket:
+    Type: String
+
+Resources:
+
+  ServiceGlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: "glue-policies"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:*"
+                Resource:
+                  - "*"
+              
+  ServiceGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub
+          - "s3://${BucketName}/${CommitHash}/FilterTag.scala"
+          - BucketName: !Ref ArtifactBucket
+      DefaultArguments:
+        "--job-language": "scala"
+        "--class": "FilterTag"
+      GlueVersion: 2.0
+      ExecutionProperty:
+        MaxConcurrentRuns: 100
+      MaxRetries: 0
+      Role: !Ref ServiceGlueJobRole
+
+  GAPreprocessorJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub
+          - "s3://${BucketName}/${CommitHash}/GAPreprocessor.scala"
+          - BucketName: !Ref ArtifactBucket
+      DefaultArguments:
+        "--job-language": "scala"
+        "--class": "GAPreprocessor"
+      GlueVersion: 2.0
+      NumberOfWorkers: 20
+      WorkerType: G.1X
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      Role: !Ref ServiceGlueJobRole
+  
+  GAPreprocessorWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString:
+        Fn::Sub:
+          - |
+            {
+              "Comment": "Google Analytics Preprocessor Workflow to trigger glue jobs",
+              "StartAt": "ErrorHandling",
+              "States": {
+                "ErrorHandling": {
+                  "Type": "Parallel",
+                  "ResultPath": null,
+                  "Branches": [
+                    {
+                      "StartAt": "Parse Date",
+                      "States": {
+                        "Parse Date": {
+                          "Type": "Task",
+                          "Resource": "${DateParserLambda}",
+                          "ResultPath": "$.parsedDate",
+                          "Parameters": {
+                            "date.$": "$.date",
+                            "format": "yyyy-MM-dd'T'HH:mm:ss'Z'"
+                          },
+                          "Next": "Subtract 1 Day"
+                        },
+                        "Subtract 1 Day": {
+                          "Type": "Task",
+                          "Resource": "${DateMathLambda}",
+                          "ResultPath": "$.prevDate",
+                          "Parameters": {
+                            "duration": "P-1D",
+                            "date": {
+                              "date.$": "$.date",
+                              "format": "yyyy-MM-dd'T'HH:mm:ss'Z'"
+                            }
+                          },
+                          "Next": "Parse Prev Date"
+                        },
+                        "Parse Prev Date": {
+                          "Type": "Task",
+                          "Resource": "${DateParserLambda}",
+                          "ResultPath": "$.parsedPrevDate",
+                          "Parameters": {
+                            "date.$": "$.prevDate",
+                            "format": "yyyy-MM-dd'T'HH:mm:ss'Z'"
+                          },
+                          "Next": "Build S3 partition path"
+                        },
+                        "Build S3 partition path": {
+                          "Type": "Pass",
+                          "ResultPath": "$.fromS3Path",
+                          "Parameters": {
+                            "path.$": "States.Format('raw/gatags/v1/year={}/month={}/day={}/', $.parsedDate.year, $.parsedDate.month, $.parsedDate.day)"
+                          },
+                          "Next": "Build S3 previous partition path"
+                        },
+                        "Build S3 previous partition path": {
+                          "Type": "Pass",
+                          "ResultPath": "$.fromS3PrevPath",
+                          "Parameters": {
+                            "path.$": "States.Format('raw/gatags/v1/year={}/month={}/day={}/', $.parsedPrevDate.year, $.parsedPrevDate.month, $.parsedPrevDate.day)"
+                          },
+                          "Next": "Start GAPreprocessorJob"
+                        },
+                        "Start GAPreprocessorJob": {
+                          "Type": "Task",
+                          "Resource": "arn:aws:states:::glue:startJobRun.sync",
+                          "ResultPath": null,
+                          "Parameters": {
+                            "JobName": "${GAPreprocessorJob}",
+                            "Arguments": {
+                              "--GA_S3BUCKET": "${GAS3Bucket}",
+                              "--GA_PREPROCESS_DATABUCKET": "${GAPreprocessS3Bucket}",
+                              "--PARTITION_PATH.$": "$.fromS3Path.path",
+                              "--DAY.$": "$.parsedDate.day",
+                              "--MONTH.$": "$.parsedDate.month",
+                              "--YEAR.$": "$.parsedDate.year",
+                              "--PREVIOUSDAY_PARTITION_PATH.$": "$.fromS3PrevPath.path"
+                            }
+                          },
+                          "Next": "Build Add Partition SQL"
+                        },
+                        "Build Add Partition SQL": {
+                          "Type": "Task",
+                          "Resource": "${TemplatingLambda}",
+                          "ResultPath": "$.sql",
+                          "Parameters": {
+                            "template": "ALTER TABLE gaid_${BranchName}.raw_gatags_v1 ADD IF NOT EXISTS PARTITION (year = '${!year}', month = '${!month}', day = '${!day}')",
+                            "params": {
+                              "year.$": "$.parsedDate.year",
+                              "month.$": "$.parsedDate.month",
+                              "day.$": "$.parsedDate.day"
+                            }
+                          },
+                          "Next": "Run Partition SQL"
+                        },
+                        "Run Partition SQL": {
+                          "Type": "Task",
+                          "Resource": "${AthenaQueryLambda}",
+                          "ResultPath": "$.sqlOutput",
+                          "Parameters": {
+                            "query.$": "$.sql"
+                          },
+                          "End": true
+                        }
+                      }
+                    }
+                  ],
+                  "Next": "Job Succeeded",
+                  "Catch": [
+                    {
+                      "ErrorEquals": [
+                        "States.ALL"
+                      ],
+                      "ResultPath": "$.error",
+                      "Next": "SendFailureNotification"
+                    }
+                  ]
+                },
+                "SendFailureNotification": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sns:publish",
+                  "Parameters": {
+                    "TopicArn": "${FailureSNSTopic}",
+                    "Message": {
+                      "Input.$": "$"
+                    }
+                  },
+                  "Next": "Job Failed"
+                },
+                "Job Failed": {
+                  "Type": "Fail"
+                },
+                "Job Succeeded": {
+                  "Parameters": {
+                    "date.$": "$.date",
+                    "AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID.$": "$$.Execution.Id"
+                  },
+                  "Type": "Pass",
+                  "End": true
+                }
+              }
+            }
+          - GAS3Bucket:
+              Fn::ImportValue: !Sub GoogleAnalyticsDataBucket-${BranchName}
+            PreprocessPartitionPath:
+              !Join
+              - '/'
+              - - !Ref Zone
+                - !Ref Project
+                - !Ref Namespace
+                - !Ref Version  
+            GAPreprocessorJob: !Ref GAPreprocessorJob
+            GAPreprocessS3Bucket: !Ref GAPreprocessedDataBucket
+            DateParserLambda: !Sub '{{resolve:ssm:/${BranchName}/lambda.date-parser:2}}:v1'
+            DateMathLambda: !Sub '{{resolve:ssm:/${BranchName}/lambda.date-math:2}}:v1'
+            AthenaQueryLambda: !Sub '{{resolve:ssm:/${BranchName}/lambda.athena-query:2}}:v1'
+            TemplatingLambda: !Sub '{{resolve:ssm:/${BranchName}/lambda.templating:2}}:v1'
+            FailureSNSTopic: !Ref SNSTopic
+      RoleArn: !GetAtt WorkflowRole.Arn
+
+  GlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Sub "gaid_${BranchName}"
+      CatalogId: !Ref 'AWS::AccountId'
+      TableInput:
+        Name: !Sub
+          - "${zone}_${project}_${namespace}_${version}"
+          - {
+            zone: !Ref Zone,
+            project: !Ref Project,
+            namespace: !Ref Namespace,
+            version: !Ref Version
+          }
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          classification: 'parquet',
+          typeOfData: file,
+          compressionType: none
+        }
+        PartitionKeys:
+          - Name: 'year'
+            Type: string
+          - Name: 'month'
+            Type: string
+          - Name: 'day'
+            Type: string
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+          Location: !Sub
+            - s3://${s3Bucket}/${zone}/${project}/${namespace}/${version}/
+            - s3Bucket: !Ref GAPreprocessedDataBucket
+              zone: !Ref Zone
+              project: !Ref Project
+              namespace: !Ref Namespace
+              version: !Ref Version
+          Columns:
+            - Name: clientId
+              Type: string
+              Comment: The id from the client
+            - Name: tag
+              Type: string
+              Comment: The tag data collected
+
+  WorkflowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: gluejob-role
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "glue:StartJobRun"
+                  - "glue:GetJobRun"
+                  - "glue:GetJobRuns"
+                  - "glue:BatchStopJobRun"
+                Resource:
+                  - !Sub
+                    - "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${JobName}"
+                    - JobName: !Ref GAPreprocessorJob
+                  - !Sub
+                    - "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${JobName}"
+                    - JobName: !Ref ServiceGlueJob
+              - Effect: Allow
+                Action:
+                  - "lambda:*"
+                Resource:
+                  - !Sub '{{resolve:ssm:/${BranchName}/lambda.date-math:2}}:*'
+                  - !Sub '{{resolve:ssm:/${BranchName}/lambda.date-parser:2}}:*'
+                  - !Sub '{{resolve:ssm:/${BranchName}/lambda.templating:2}}:*'
+                  - !Sub '{{resolve:ssm:/${BranchName}/lambda.athena-query:2}}:v1'
+              - Effect: Allow
+                Action:
+                  - "states:*"
+                Resource:
+                  - "*"
+  SNSTopic:
+    Type: AWS::SNS::Topic
+
+  SNSTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SNSTopic
+      Endpoint: !Sub me@gmail.com
+      Protocol: email
+
+Outputs:
+  ServiceGlueJob:
+    Description: Service Glue Job
+    Value: !Ref ServiceGlueJob

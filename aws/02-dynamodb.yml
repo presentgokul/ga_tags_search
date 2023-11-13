@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  BranchName:
+    Type: String
+
+
+Resources:
+  ServiceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ServiceTable-${BranchName}
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N  
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+        - AttributeName: user_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes: 
+        - IndexName: Userid_Timestamp_Index
+          KeySchema: 
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection: 
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 3
+            WriteCapacityUnits: 3
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub ServiceTable-Dynamo-${BranchName}
+  
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    
+  SNSTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SNSTopic
+      Endpoint: !Sub me@gmail.com
+      Protocol: email
+  
+  SNSPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: "*"
+          Action: sns:Publish
+          Resource: !Ref SNSTopic
+      Topics:
+      - !Ref SNSTopic
+    
+  ServiceDynamoReadAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm for Dynamodb ConsumedReadCapacityUnits"
+      AlarmActions:
+        - !Ref SNSTopic
+      OKActions:
+        - !Ref SNSTopic
+      Namespace: AWS/DynamoDB
+      MetricName: ConsumedReadCapacityUnits
+      Statistic: Sum
+      TreatMissingData: notBreaching
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 240
+      Dimensions:
+        - Name: TableName
+          Value: 
+            Fn::Sub:
+              - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
+              - TableName: !Ref ServiceTable
+
+  ServiceGSIDynamoReadAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm for Dynamodb GSI ConsumedReadCapacityUnits"
+      AlarmActions:
+        - !Ref SNSTopic
+      OKActions:
+        - !Ref SNSTopic
+      Namespace: AWS/DynamoDB
+      MetricName: ConsumedReadCapacityUnits
+      Statistic: Sum
+      TreatMissingData: notBreaching
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 120
+      Dimensions:
+        - Name: TableName
+          Value: 
+            Fn::Sub:
+              - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
+              - TableName: !Ref ServiceTable
+        - Name: GlobalSecondaryIndexName
+          Value: Userid_Timestamp_Index
+
+  ServiceDynamoWriteAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm for Dynamodb ConsumedWriteCapacityUnits"
+      AlarmActions:
+        - !Ref SNSTopic
+      OKActions:
+        - !Ref SNSTopic
+      Namespace: AWS/DynamoDB
+      MetricName: ConsumedWriteCapacityUnits
+      Statistic: Sum
+      TreatMissingData: notBreaching
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 240
+      Dimensions:
+        - Name: TableName
+          Value: 
+            Fn::Sub:
+              - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
+              - TableName: !Ref ServiceTable
+
+  ServiceGSIDynamoWriteAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm for Dynamodb GSI ConsumedWriteCapacityUnits"
+      AlarmActions:
+        - !Ref SNSTopic
+      OKActions:
+        - !Ref SNSTopic
+      Namespace: AWS/DynamoDB
+      MetricName: ConsumedWriteCapacityUnits
+      Statistic: Sum
+      TreatMissingData: notBreaching
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 120
+      Dimensions:
+        - Name: TableName
+          Value: 
+            Fn::Sub:
+              - "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
+              - TableName: !Ref ServiceTable
+        - Name: GlobalSecondaryIndexName
+          Value: Userid_Timestamp_Index
+      
+Outputs:
+  ServiceTable:
+    Description: Service Table
+    Value: !Ref ServiceTable
